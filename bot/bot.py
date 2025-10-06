@@ -877,7 +877,7 @@ async def _ensure_bot_id() -> int:
     """Возвращает идентификатор бота (требуется для FSM StorageKey)."""
     bot_id = getattr(bot, "id", None)
     if not bot_id:
-        bot_id = (await bot.me()).id
+        bot_id = (await bot.get_me()).id
     return bot_id
 
 
@@ -1000,7 +1000,7 @@ async def friend_add_button(cb: CallbackQuery, state: FSMContext):
     inviter_id = cb.from_user.id
 
     # создаём простую (некодированную) deep-link и явную команду
-    bot_username = (await bot.me()).username
+    bot_username = (await bot.get_me()).username
     link = f"https://t.me/{bot_username}?start=friend_{inviter_id}"
     cmd = f"/start friend_{inviter_id}"
 
