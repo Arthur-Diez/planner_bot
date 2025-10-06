@@ -93,7 +93,9 @@ async def init_db() -> None:
 
 
 @dp.message(Command("webapptest"))
-async def open_webapp(message: Message):
+async def open_webapp(message: Message, state: FSMContext):
+    if await ensure_friend_name_required(message, state):
+        return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="Открыть WebApp",
@@ -118,7 +120,9 @@ planner_inline_kb = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 @dp.message(Command("planner"))
-async def open_planner(message: Message):
+async def open_planner(message: Message, state: FSMContext):
+    if await ensure_friend_name_required(message, state):
+        return
     await message.answer(
         "Открой мини-приложение планнера:",
         reply_markup=planner_inline_kb
@@ -279,22 +283,24 @@ async def cmd_start_with_payload(message: Message, command: CommandObject, state
                 a, b, inviter["telegram_id"]
             )
 
-        # сообщаем обоим
-        user_mention = (message.from_user.username and f"@{message.from_user.username}") or message.from_user.full_name or "друг"
-        await bot.send_message(inviter_tg_id, f"👥 Новый друг добавлен! Как ты хочешь называть {user_mention}?")
-        await bot.send_message(inviter_tg_id, "👥 Новый друг добавлен! Как ты хочешь его называть?")
+        user_mention = (message.from_user.username and f"@{message.from_user.username}") or message.from_user.full_name or "друга"
+        await _start_friend_name_flow(
+            inviter_tg_id,
+            (a, b),
+            intro=f"👥 {user_mention} теперь у тебя в друзьях!",
+        )
 
-        friend_states_key = StorageKey(bot_id=bot.id, chat_id=inviter_tg_id, user_id=inviter_tg_id)
-        await dp.storage.set_state(friend_states_key, FriendStates.awaiting_friend_name)
-        await dp.storage.update_data(friend_states_key, data={"friend_ids": (a, b)})
-
-        inviter_user = await bot.get_chat(inviter_tg_id)
-        inviter_mention = (inviter_user.username and f"@{inviter_user.username}") or inviter_user.full_name or "друга"
-        await message.answer(f"🎉 Вы теперь друзья с {inviter_mention}!\nКак ты хочешь его называть в боте?")
-
-        await state.set_state(FriendStates.awaiting_friend_name)
-        await state.update_data(friend_ids=(a, b))
+        inviter_label = await _friend_profile_label(inviter_tg_id)
+        await _start_friend_name_flow(
+            tg_id,
+            (a, b),
+            message=message,
+            state=state,
+            intro=f"🎉 Вы теперь друзья с {inviter_label}!",
+        )
     else:
+        if await ensure_friend_name_required(message, state):
+            return
         await message.answer("👋 Готов работать! Используй кнопки ниже.", reply_markup=main_kb)
 
 @dp.message(Command("start"))
@@ -388,10 +394,19 @@ async def prof_tz(message: Message, state: FSMContext):
                         a, b, inviter["telegram_id"]
                     )
 
-        await bot.send_message(inviter_tg_id, "👥 Новый друг добавлен! Как ты хочешь его называть?")
-        await message.answer("🎉 Вы теперь друзья! Как ты хочешь называть этого друга в боте?")
-        await state.set_state(FriendStates.awaiting_friend_name)
-        await state.update_data(friend_ids=(a, b))
+        await _start_friend_name_flow(
+            inviter_tg_id,
+            (a, b),
+            intro=f"👥 {message.from_user.full_name or 'Друг'} теперь у тебя в друзьях!",
+        )
+        friend_label = await _friend_profile_label(inviter_tg_id)
+        await _start_friend_name_flow(
+            tg_id,
+            (a, b),
+            message=message,
+            state=state,
+            intro=f"🎉 Вы теперь друзья с {friend_label}!",
+        )
         return
 
 
@@ -728,7 +743,9 @@ async def confirm_move_new(cb: CallbackQuery, state: FSMContext):
 @dp.message(F.text.in_(
     ["Мои планы", "Покупки", "Как работает бот", "Поддержка"]
 ))
-async def placeholders(message: Message):
+async def placeholders(message: Message, state: FSMContext):
+    if await ensure_friend_name_required(message, state):
+        return
     await message.answer("Функционал в разработке ✨")
 
 
@@ -856,10 +873,112 @@ async def delete_old(cb: CallbackQuery, state: FSMContext):
 class FriendStates(StatesGroup):
     awaiting_friend_name = State()
 
+async def _ensure_bot_id() -> int:
+    """Возвращает идентификатор бота (требуется для FSM StorageKey)."""
+    bot_id = getattr(bot, "id", None)
+    if not bot_id:
+        bot_id = (await bot.me()).id
+    return bot_id
+
+
+async def _friend_profile_label(friend_tg: int) -> str:
+    """Формирует человеко-понятное имя профиля друга для сообщений."""
+    chat = await bot.get_chat(friend_tg)
+    base = chat.full_name or chat.username or "друга"
+    username = f" (@{chat.username})" if chat.username else ""
+    return f"{base}{username}"
+
+
+async def _start_friend_name_flow(
+    user_tg_id: int,
+    friend_ids: tuple[int, int],
+    *,
+    message: Message | None = None,
+    state: FSMContext | None = None,
+    intro: str | None = None,
+) -> None:
+    """Переводит пользователя в состояние задания имени другу и присылает подсказку."""
+
+    sorted_ids = tuple(sorted(friend_ids))
+    friend_tg = sorted_ids[1] if user_tg_id == sorted_ids[0] else sorted_ids[0]
+    friend_label = await _friend_profile_label(friend_tg)
+
+    if state is None or state.key.user_id != user_tg_id:
+        bot_id = await _ensure_bot_id()
+        state = FSMContext(storage=dp.storage, key=StorageKey(bot_id=bot_id, chat_id=user_tg_id, user_id=user_tg_id))
+
+    await state.set_state(FriendStates.awaiting_friend_name)
+    await state.update_data(friend_ids=sorted_ids, friend_tg_id=friend_tg, friend_label=friend_label)
+
+    header = intro or f"👥 Новый друг добавлен!"
+    text = (
+        f"{header}\n"
+        f"Напиши, как ты хочешь называть {friend_label} в боте.\n"
+        "Без имени бот не сможет продолжить работу."
+    )
+
+    if message is not None:
+        await message.answer(text)
+    else:
+        await bot.send_message(user_tg_id, text)
+
+
+async def _find_pending_friend(user_tg_id: int, *, exclude: tuple[int, int] | None = None) -> asyncpg.Record | None:
+    """Возвращает пару пользователей, для которой нужно задать имя другу."""
+
+    async with db_pool.acquire() as conn:
+        params: list[int] = [user_tg_id]
+        exclude_cond = ""
+        if exclude:
+            x, y = sorted(exclude)
+            exclude_cond = " AND NOT (user_a=$2 AND user_b=$3)"
+            params.extend([x, y])
+
+        query = f"""
+            SELECT user_a, user_b
+            FROM friends
+            WHERE (user_a=$1 OR user_b=$1)
+              AND status='accepted'
+              AND ((user_a=$1 AND name_for_a IS NULL) OR (user_b=$1 AND name_for_b IS NULL))
+              {exclude_cond}
+            ORDER BY COALESCE(answered_at, requested_at, NOW()) DESC
+            LIMIT 1
+        """
+        return await conn.fetchrow(query, *params)
+
+
+async def ensure_friend_name_required(message: Message, state: FSMContext) -> bool:
+    """Проверяет, нужно ли пользователю назвать друга, и при необходимости просит это сделать."""
+
+    current_state = await state.get_state()
+    tg_id = message.from_user.id
+
+    if current_state == FriendStates.awaiting_friend_name.state:
+        data = await state.get_data()
+        friend_label = data.get("friend_label") or "нового друга"
+        await message.answer(
+            f"👥 Сначала назови {friend_label}. Просто отправь одно сообщение с именем.")
+        return True
+
+    pending = await _find_pending_friend(tg_id)
+    if pending:
+        await _start_friend_name_flow(
+            tg_id,
+            (pending["user_a"], pending["user_b"]),
+            message=message,
+            state=state,
+            intro=None,
+        )
+        return True
+
+    return False
+
 
 
 @dp.message(F.text == "Друзья")
-async def handle_friends_menu(message: Message):
+async def handle_friends_menu(message: Message, state: FSMContext):
+    if await ensure_friend_name_required(message, state):
+        return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Список друзей", callback_data="friends_list")],
         [InlineKeyboardButton(text="➕ Добавить друга", callback_data="friend_add")],
@@ -874,7 +993,10 @@ async def handle_friends_menu(message: Message):
 
 # --- кнопка "Добавить друга" ---
 @dp.callback_query(F.data == "friend_add")
-async def friend_add_button(cb: CallbackQuery):
+async def friend_add_button(cb: CallbackQuery, state: FSMContext):
+    if await ensure_friend_name_required(cb.message, state):
+        await cb.answer()
+        return
     inviter_id = cb.from_user.id
 
     # создаём простую (некодированную) deep-link и явную команду
@@ -905,6 +1027,10 @@ async def save_friend_name(message: Message, state: FSMContext):
     tg_id = message.from_user.id
     friend_name = message.text.strip()
 
+        if not friend_name:
+        await message.answer("⚠️ Имя не может быть пустым. Напиши, как ты хочешь называть друга.")
+        return
+
     async with db_pool.acquire() as conn:
         me = tg_id  # telegram_id = PK
         friend_ids = data.get("friend_ids")
@@ -922,15 +1048,26 @@ async def save_friend_name(message: Message, state: FSMContext):
         friend_id = user_b if me == user_a else user_a
         friend_tg = friend_id  # уже telegram_id
 
-    friend_chat = await bot.get_chat(friend_tg)
-    friend_mention = f"@{friend_chat.username}" if friend_chat.username else friend_chat.full_name
+    friend_label = data.get("friend_label")
+    if not friend_label:
+        friend_label = await _friend_profile_label(friend_tg)
 
     await state.clear()
     await message.answer(
-        f"✅ Имя друга сохранено!\nТы назвал(а) {friend_mention}: <b>{friend_name}</b>",
+        f"✅ Имя друга сохранено!\nТы назвал(а) {friend_label}: <b>{friend_name}</b>",
         reply_markup=main_kb,
         parse_mode=ParseMode.HTML
     )
+
+    next_pending = await _find_pending_friend(tg_id, exclude=tuple(sorted(friend_ids)))
+    if next_pending:
+        await _start_friend_name_flow(
+            tg_id,
+            (next_pending["user_a"], next_pending["user_b"]),
+            message=message,
+            state=state,
+            intro="👥 Остались и другие друзья без имени.",
+        )
 
 
 ########################################################################################################################
@@ -1169,13 +1306,9 @@ async def main() -> None:
 
 @dp.message(StateFilter(None))
 async def any_text(message: Message, state: FSMContext):
-    uid = message.from_user.id
-    data = await state.get_data()
-    current_state = await state.get_state()
-
-    if current_state == FriendStates.awaiting_friend_name or data.get("friend_ids"):
-        print("🔕 Ожидаем имя друга — не обрабатываем задачу.")
+    if await ensure_friend_name_required(message, state):
         return
+    uid = message.from_user.id
 
     async with db_pool.acquire() as conn:
         tz_offset = await conn.fetchval(
@@ -1446,7 +1579,9 @@ async def ch_event_add(cb: CallbackQuery):
 
 ### Команда для списка челленджей (быстрый доступ из бота)
 @dp.message(Command("challenges"))
-async def list_my_challenges(message: Message):
+async def list_my_challenges(message: Message, state: FSMContext):
+    if await ensure_friend_name_required(message, state):
+        return
     uid = message.from_user.id
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
