@@ -3,7 +3,7 @@ import uvicorn
 from bot.webhook_api import app as fastapi_app  # FastAPI-приложение
 import config
 from bot import main
-from bot.bot import init_db
+
 
 
 async def start_api():
@@ -18,28 +18,35 @@ async def start_api():
     server = uvicorn.Server(config_uvicorn)
     await server.serve()
 
+def _is_render_enabled() -> bool:
+    """Корректно преобразуем переменную окружения к bool."""
+
+    value = getattr(config, "ENABLE_RENDER", False)
+    if isinstance(value, bool):
+        return value
+
+    if value is None:
+        return False
+
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
 
 async def main_task():
     """Основная корутина: бот + API"""
-    await init_db()  # создаём пул БД один раз при старте
-
-    if bool(config.ENABLE_RENDER):
+    if _is_render_enabled():
         await asyncio.gather(
             main(),       # запуск бота
             start_api(),  # запуск API
         )
     else:
-        await asyncio.gather(
-            main(),
-            start_api(),
-        )
+        await main()
 
 
 if __name__ == "__main__":
     import logging, sys, traceback
     logging.basicConfig(level=logging.INFO)
     try:
-        asyncio.run(main())
+        asyncio.run(main_task())
     except Exception:
         logging.exception("BOT CRASHED ON STARTUP")
         sys.exit(1)
