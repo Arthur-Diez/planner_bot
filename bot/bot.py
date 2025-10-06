@@ -1027,7 +1027,7 @@ async def save_friend_name(message: Message, state: FSMContext):
     tg_id = message.from_user.id
     friend_name = message.text.strip()
 
-        if not friend_name:
+    if not friend_name:
         await message.answer("⚠️ Имя не может быть пустым. Напиши, как ты хочешь называть друга.")
         return
 
