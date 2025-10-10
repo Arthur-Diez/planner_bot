@@ -3,10 +3,10 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
+import asyncio 
 import asyncpg
 
 from db_config import DB_CONFIG
-from bot.bot import db_pool  # общий пул из бота
 from bot.bot import db_pool, bot
 
 app = FastAPI()
@@ -219,31 +219,8 @@ async def friends_with_shared(uid: int = Query(...), window_days: int = 14):
                 (t.assigned_to_user_id=$1 OR t.assigned_by_user_id=$1)
                 AND (t.assigned_to_user_id IN (SELECT fid FROM fr) OR t.assigned_by_user_id IN (SELECT fid FROM fr))
                 AND t.deleted_at IS NULL
-                AND (t.start_dt >= now() - interval '1 day' AND t.start_dt < now() + ($2 || ' days')::interval)
-            )
-            SELECT u.telegram_id AS friend_id, u.full_name
-            FROM t JOIN users_planner u ON u.telegram_id=t.fid
-        """, uid, window_days)
-    return [{"user_id": r["friend_id"], "full_name": r["full_name"]} for r in rows]
-
-
-@app.get("/friends/with-shared")
-async def friends_with_shared(uid: int = Query(...), window_days: int = 14):
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            WITH fr AS (
-              SELECT CASE WHEN f.user_a=$1 THEN f.user_b ELSE f.user_a END AS fid
-              FROM friends f
-              WHERE (f.user_a=$1 OR f.user_b=$1) AND f.status='accepted'
-            ), t AS (
-              SELECT DISTINCT
-                CASE WHEN t.assigned_by_user_id=$1 THEN t.assigned_to_user_id ELSE t.assigned_by_user_id END AS fid
-              FROM tasks t
-              WHERE
-                (t.assigned_to_user_id=$1 OR t.assigned_by_user_id=$1)
-                AND (t.assigned_to_user_id IN (SELECT fid FROM fr) OR t.assigned_by_user_id IN (SELECT fid FROM fr))
-                AND t.deleted_at IS NULL
-                AND (t.start_dt >= now() - interval '1 day' AND t.start_dt < now() + ($2 || ' days')::interval)
+                AND (t.start_dt >= now() - interval '1 day'
+                     AND t.start_dt <  now() + make_interval(days => $2))   -- ✅ вместо ($2 || ' days')::interval
             )
             SELECT u.telegram_id AS friend_id, u.full_name
             FROM t JOIN users_planner u ON u.telegram_id=t.fid
