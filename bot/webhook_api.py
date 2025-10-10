@@ -244,7 +244,8 @@ async def shared_tasks(uid: int = Query(...), window_days: int = 7):
             WHERE t.deleted_at IS NULL
               AND ( (t.assigned_to_user_id=$1 AND t.assigned_by_user_id IN (SELECT fid FROM fr))
                  OR (t.assigned_by_user_id=$1 AND t.assigned_to_user_id IN (SELECT fid FROM fr)) )
-              AND (t.start_dt >= now() - interval '1 day' AND t.start_dt < now() + ($2 || ' days')::interval)
+              AND (t.start_dt >= now() - interval '1 day'
+                   AND t.start_dt <  now() + make_interval(days => $2))   -- ← ВАЖНО
             ORDER BY t.start_dt
         """, uid, window_days)
         # подтянем имена друзей
