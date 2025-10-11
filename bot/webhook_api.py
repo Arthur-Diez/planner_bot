@@ -2,7 +2,7 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 import asyncio 
 import asyncpg
 
@@ -29,6 +29,15 @@ async def _maybe_init_pool():
         print("✅ DB Pool initialized (webhook_api)!")
 
 # ---------- модели ----------
+class RecurIn(BaseModel):
+    rrule: str | None = None       # iCalendar RRULE
+    until: datetime | None = None  # ISO с tz-offset
+    exdates: list[date] | None = None
+    rdates: list[datetime] | None = None
+    skip_policy: str | None = None # 'skip' | 'next_weekday' | 'shift_n'
+    shift_n: int | None = None
+
+
 class TaskCreateRequest(BaseModel):
     telegram_id: int                 # кто создаёт (assigned_by_user_id)
     title: str
@@ -37,6 +46,8 @@ class TaskCreateRequest(BaseModel):
     end_dt: datetime | None = None
     all_day: bool = False
     for_user: int | None = None      # кому назначаем (assigned_to_user_id)
+    recur: RecurIn | None = None
+    notifications: dict | None = None
 
 # ---------- утилиты ----------
 def local_day_bounds_utc(day_iso: str, offset_min: int) -> tuple[datetime, datetime]:
@@ -144,20 +155,49 @@ async def add_task(task: TaskCreateRequest):
     if task.start_dt and task.end_dt:
         duration_min = int((task.end_dt - task.start_dt).total_seconds() // 60)
 
+    recur_rule = None
+    recur_until = None
+    exdates = None
+    rdates = None
+    skip_policy = None
+    shift_n = None
+
+    if task.recur is not None:
+        recur_rule = task.recur.rrule
+        recur_until = task.recur.until
+        exdates = task.recur.exdates
+        rdates = task.recur.rdates
+        skip_policy = task.recur.skip_policy
+        shift_n = task.recur.shift_n
+
     async with db_pool.acquire() as conn:
-        await conn.execute(
+        new_id = await conn.fetchval(
             """
             INSERT INTO tasks (
                 title, description, start_dt, end_dt, all_day,
                 assigned_to_user_id, assigned_by_user_id,
-                status, duration_min
+                status, duration_min,
+                recur_rule, recur_until, exdates, rdates, skip_policy, shift_n
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9,$10,$11,$12,$13,$14)
+            RETURNING id
             """,
-            task.title, task.description, task.start_dt, task.end_dt, task.all_day,
-            assignee, author, duration_min
+            task.title,
+            task.description,
+            task.start_dt,
+            task.end_dt,
+            task.all_day,
+            assignee,
+            author,
+            duration_min,
+            recur_rule,
+            recur_until,
+            exdates,
+            rdates,
+            skip_policy,
+            shift_n,
         )
-    return {"status": "success"}
+    return {"status": "success", "id": new_id}
 
 ### Функционал с друзьями и челленджами: #####
 
